@@ -1,0 +1,6 @@
+build/
+*.so
+log
+*.log
+*.pyc
+compile_commands.json
