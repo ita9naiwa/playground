@@ -29,9 +29,9 @@ torch::Tensor simple_cutlass_gemm(
   const float* B_ptr = B.data_ptr<float>();
   float* C_ptr = C.data_ptr<float>();
 
-  int lda = int(M);
-  int ldb = int(K);
-  int ldc = int(M);
+  int lda = int(K);
+  int ldb = int(N);
+  int ldc = int(N);
 
   cudaError_t err = CutlassSgemmNN(
     (int)M, (int)N, (int)K,
