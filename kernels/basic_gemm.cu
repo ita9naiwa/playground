@@ -1,26 +1,3 @@
-/*
-  This example demonstrates how to call a CUTLASS GEMM kernel and provides a naive reference
-  matrix multiply kernel to verify its correctness.
-
-  The CUTLASS Gemm template is instantiated in the function CutlassSgemmNN. This is kernel computes
-  the general matrix product (GEMM) using single-precision floating-point arithmetic and assumes
-  all matrices have column-major layout.
-
-  The threadblock tile size is chosen as 128x128x8 which offers good performance for large matrices.
-  See the CUTLASS Parallel for All blog post for more exposition on the tunable parameters available
-  in CUTLASS.
-
-  https://devblogs.nvidia.com/cutlass-linear-algebra-cuda/
-
-  Aside from defining and launching the SGEMM kernel, this example does not use any other components
-  or utilities within CUTLASS. Such utilities are demonstrated elsewhere in other examples and are
-  prevalent in the CUTLASS unit tests.
-
-  This example has delibrately been kept similar to the basic_gemm example from cutlass-1.3 to
-  highlight the minimum amount of differences needed to transition to cutlass-2.0.
-
-  Cutlass-1.3 sgemm: https://github.com/NVIDIA/cutlass/blob/master/examples/00_basic_gemm/basic_gemm.cu
-*/
 #include <iostream>
 
 using std::cerr, std::endl;
@@ -53,11 +30,11 @@ cudaError_t CutlassSgemmNN(
   using RowMajor = cutlass::layout::RowMajor;
 
   using CutlassGemm = cutlass::gemm::device::Gemm<float,        // Data-type of A matrix
-                                                  RowMajor,  // Layout of A matrix
-                                                  float,        // Data-type of B matrix
-                                                  RowMajor,  // Layout of B matrix
-                                                  float,        // Data-type of C matrix
-                                                  RowMajor>; // Layout of C matrix
+  RowMajor,  // Layout of A matrix
+  float,        // Data-type of B matrix
+  RowMajor,  // Layout of B matrix
+  float,        // Data-type of C matrix
+  RowMajor>; // Layout of C matrix
 
   // Define a CUTLASS GEMM type
   CutlassGemm gemm_operator;
