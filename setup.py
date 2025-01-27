@@ -1,4 +1,7 @@
 import os
+os.environ["CUDA_HOME"] = "/usr/local/cuda-12.8"
+
+import sys
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 
@@ -18,6 +21,7 @@ setup(
             sources=[
                 'kernels/basic_gemm.cu',
                 'kernels/gemm_relu.cu',
+                'kernels/revisit_matmul.cu',
                 'pybind.cu'
             ],
             include_dirs=[
@@ -29,7 +33,7 @@ setup(
             extra_compile_args={
                 'cxx': [],
                 'nvcc': [
-                    '-gencode=arch=compute_89,code=sm_89',
+                    '-gencode=arch=compute_80,code=sm_80',
                 ]
             }
         ),

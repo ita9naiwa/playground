@@ -1,8 +1,12 @@
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+
 #include <iostream>
 
+#include "basic_gemm.h"
 using std::cerr, std::endl;
 
-#include "basic_gemm.h"
+
 
 cudaError_t CutlassSgemmNN(
   int M,
@@ -73,4 +77,37 @@ cudaError_t CutlassSgemmNN(
 
   // Return success, if no errors were encountered.
   return cudaSuccess;
+}
+
+torch::Tensor simple_cutlass_gemm(
+    torch::Tensor &A,
+    torch::Tensor &B,
+    float alpha,
+    float beta) {
+  int64_t M = A.size(0);
+  int64_t N = B.size(1);
+  int64_t K = A.size(1);
+  auto options = A.options();
+  torch::Tensor C = torch::zeros({M, N}, options);
+
+  const float* A_ptr = A.data_ptr<float>();
+  const float* B_ptr = B.data_ptr<float>();
+  float* C_ptr = C.data_ptr<float>();
+
+  int lda = int(K);
+  int ldb = int(N);
+  int ldc = int(N);
+
+  cudaError_t err = CutlassSgemmNN(
+    (int)M, (int)N, (int)K,
+    alpha,
+    A_ptr, lda,
+    B_ptr, ldb,
+    beta,
+    C_ptr, ldc
+  );
+  if (cudaSuccess != err) {
+    cerr << "Error in CutlassSgemmNN: " << cudaGetErrorString(err) << endl;
+  }
+  return C;
 }
