@@ -1,26 +1,13 @@
-#include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <torch/extension.h>
 
 #include <iostream>
 
 #include "basic_gemm.h"
 using std::cerr, std::endl;
 
-
-
-cudaError_t CutlassSgemmNN(
-  int M,
-  int N,
-  int K,
-  float alpha,
-  float const *A,
-  int lda,
-  float const *B,
-  int ldb,
-  float beta,
-  float *C,
-  int ldc) {
-
+cudaError_t CutlassSgemmNN(int M, int N, int K, float alpha, float const *A, int lda, float const *B, int ldb,
+                           float beta, float *C, int ldc) {
   // Define type definition for single-precision CUTLASS GEMM with column-major
   // input matrices and 128x128x8 threadblock tile size (chosen by default).
   //
@@ -33,12 +20,12 @@ cudaError_t CutlassSgemmNN(
   using ColumnMajor = cutlass::layout::ColumnMajor;
   using RowMajor = cutlass::layout::RowMajor;
 
-  using CutlassGemm = cutlass::gemm::device::Gemm<float,        // Data-type of A matrix
-  RowMajor,  // Layout of A matrix
-  float,        // Data-type of B matrix
-  RowMajor,  // Layout of B matrix
-  float,        // Data-type of C matrix
-  RowMajor>; // Layout of C matrix
+  using CutlassGemm = cutlass::gemm::device::Gemm<float,      // Data-type of A matrix
+                                                  RowMajor,   // Layout of A matrix
+                                                  float,      // Data-type of B matrix
+                                                  RowMajor,   // Layout of B matrix
+                                                  float,      // Data-type of C matrix
+                                                  RowMajor>;  // Layout of C matrix
 
   // Define a CUTLASS GEMM type
   CutlassGemm gemm_operator;
@@ -52,12 +39,13 @@ cudaError_t CutlassSgemmNN(
   // The benefits of this pattern are (1.) a structured, composable strategy for passing host-constructible
   // arguments to kernels and (2.) minimized initialization overhead on kernel entry.
   //
-  CutlassGemm::Arguments args({M , N, K},  // Gemm Problem dimensions
-                              {A, lda},    // Tensor-ref for source matrix A
-                              {B, ldb},    // Tensor-ref for source matrix B
-                              {C, ldc},    // Tensor-ref for source matrix C
-                              {C, ldc},    // Tensor-ref for destination matrix D (may be different memory than source C matrix)
-                              {alpha, beta}); // Scalars used in the Epilogue
+  CutlassGemm::Arguments args(
+      {M, N, K},       // Gemm Problem dimensions
+      {A, lda},        // Tensor-ref for source matrix A
+      {B, ldb},        // Tensor-ref for source matrix B
+      {C, ldc},        // Tensor-ref for source matrix C
+      {C, ldc},        // Tensor-ref for destination matrix D (may be different memory than source C matrix)
+      {alpha, beta});  // Scalars used in the Epilogue
 
   //
   // Launch the CUTLASS GEMM kernel.
@@ -79,33 +67,22 @@ cudaError_t CutlassSgemmNN(
   return cudaSuccess;
 }
 
-torch::Tensor simple_cutlass_gemm(
-    torch::Tensor &A,
-    torch::Tensor &B,
-    float alpha,
-    float beta) {
+torch::Tensor simple_cutlass_gemm(torch::Tensor &A, torch::Tensor &B, float alpha, float beta) {
   int64_t M = A.size(0);
   int64_t N = B.size(1);
   int64_t K = A.size(1);
   auto options = A.options();
   torch::Tensor C = torch::zeros({M, N}, options);
 
-  const float* A_ptr = A.data_ptr<float>();
-  const float* B_ptr = B.data_ptr<float>();
-  float* C_ptr = C.data_ptr<float>();
+  const float *A_ptr = A.data_ptr<float>();
+  const float *B_ptr = B.data_ptr<float>();
+  float *C_ptr = C.data_ptr<float>();
 
   int lda = int(K);
   int ldb = int(N);
   int ldc = int(N);
 
-  cudaError_t err = CutlassSgemmNN(
-    (int)M, (int)N, (int)K,
-    alpha,
-    A_ptr, lda,
-    B_ptr, ldb,
-    beta,
-    C_ptr, ldc
-  );
+  cudaError_t err = CutlassSgemmNN((int)M, (int)N, (int)K, alpha, A_ptr, lda, B_ptr, ldb, beta, C_ptr, ldc);
   if (cudaSuccess != err) {
     cerr << "Error in CutlassSgemmNN: " << cudaGetErrorString(err) << endl;
   }
