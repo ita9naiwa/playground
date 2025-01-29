@@ -14,3 +14,4 @@ C = simple_cutlass_gemm(A, B, 1, 0)
 C_ref = torch.mm(A, B)
 if torch.allclose(C, C_ref, rtol=1e-4, atol=1e-4):
     print("Test passed")
+

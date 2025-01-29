@@ -22,6 +22,7 @@ setup(
                 'kernels/basic_gemm.cu',
                 'kernels/gemm_relu.cu',
                 'kernels/revisit_matmul.cu',
+                'kernels/flash_attn.cu',
                 'pybind.cu'
             ],
             include_dirs=[

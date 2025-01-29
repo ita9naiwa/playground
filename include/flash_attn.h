@@ -6,4 +6,4 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-torch::Tensor matmul(torch::Tensor A, torch::Tensor B, std::optional<torch::Tensor> C, int version, bool B_transposed);
+torch::Tensor flash_attention_v1(torch::Tensor Q, torch::Tensor k, torch::Tensor V);
