@@ -2,7 +2,7 @@ import torch
 
 from cuda_playground import flash_attention_v1
 
-B, H, N, D = 1, 1, 32, 64
+
 
 
 def test(B=1, H=1, N=32, D=64):
@@ -19,6 +19,5 @@ def test(B=1, H=1, N=32, D=64):
         print("Test failed when B,H,N,D = ", B, H, N, D)
         print((att_ref / att_my).numpy())
 
-
-test(1, 1, 16, 32)
-test(1, 1, 32, 32)
+B, H, N, D = 128, 1, 64, 64
+test(B, H, N, D)
