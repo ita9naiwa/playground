@@ -11,21 +11,6 @@
 #include "flash_attn.h"
 #include "torch/types.h"
 
-int64_t getDeviceBlockSharedMemSize() {
-  int device_id = at::cuda::current_device();
-  cudaDeviceProp prop;
-  cudaGetDeviceProperties(&prop, device_id);
-  return static_cast<int64_t>(prop.sharedMemPerBlock);
-}
-
-template <typename T>
-T ceil(T x, T y) {
-  return (x + y - 1) / y;
-}
-
-inline __device__ void kceil(int x, int y, int *ret) {
-  *ret = ((x + y - 1) / y);
-}
 
 const int BLOCK_SIZE = 16;
 const int DIM_SPACE = 64;
@@ -44,12 +29,12 @@ __global__ void flash_attention_v1_kernel(
   // V: (B, N, D)
   for(int j = 0; j < (N / BLOCK_SIZE); j++) {
     // Load K_j, V_j into shared memory
-
     for (int t = threadIdx.y; t < D; t += blockDim.y) {
       int K_index = blockIdx.x * N * D + j * BLOCK_SIZE * D + threadIdx.x * D + t;
       K_shared[threadIdx.x][t] = K[K_index];
       V_shared[threadIdx.x][t] = V[K_index];
     }
+
     __syncthreads();
     for (int i = 0; i < (N / BLOCK_SIZE); i++) {
       // fix current _m, _l;
@@ -76,9 +61,9 @@ __global__ void flash_attention_v1_kernel(
       }
       __syncthreads();
       max_ij = shared_vals[threadIdx.x][0];
-
+      __syncthreads();
       float P_ij = exp(S_ij - max_ij);
-
+      __syncthreads();
       shared_vals[threadIdx.x][threadIdx.y] = P_ij;
       __syncthreads();
       if (threadIdx.y == 0) {
@@ -90,22 +75,25 @@ __global__ void flash_attention_v1_kernel(
       float old_mi = _m[threadIdx.x];
       float old_l = _l[threadIdx.x];
       float new_mi = max(old_mi, max_ij);
-      float exp_left = exp(old_mi - new_mi);
-      float exp_right = exp(max_ij - new_mi);
-      float new_l = old_l * exp(old_mi - new_mi) + l_ij;
-
+      float alpha = exp(old_mi - new_mi);
+      float beta = exp(max_ij - new_mi);
+      float new_l = alpha * old_l + beta * l_ij;
+      __syncthreads();
       shared_vals[threadIdx.x][threadIdx.y] = P_ij;
       __syncthreads();
       float divd = (1.0f / (1e-6f + new_l));
       for (int t = threadIdx.y; t < D; t += blockDim.y) {
+        __syncthreads();
         auto O_index = blockIdx.x * N * D + i * BLOCK_SIZE * D + threadIdx.x * D + t;
-        float O_temp = divd * exp_left * old_l * O[O_index];
-        if (O_temp != 0.0f)
-          printf("O_temp: %f\n", O_temp);
+        __syncthreads();
+        float O_temp = (old_l / new_l) * alpha * O[O_index];
+        __syncthreads();
         for (int l = 0; l < BLOCK_SIZE; ++l) {
-          O_temp += divd * exp_right * shared_vals[threadIdx.x][l] * V_shared[l][t];
+          O_temp += (beta / new_l) * shared_vals[threadIdx.x][l] * V_shared[l][t];
         }
+        __syncthreads();
         O[O_index] = O_temp;
+        __syncthreads();
       }
       __syncthreads();
       if (threadIdx.y == 0) {
