@@ -4,6 +4,7 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cmath>
+#include <cstdio>
 #include <limits>
 
 #include "c10/core/ScalarType.h"
@@ -22,100 +23,96 @@ T ceil(T x, T y) {
   return (x + y - 1) / y;
 }
 
-__global__ void ceil(int x, int y, int *ret) {
+inline __device__ void kceil(int x, int y, int *ret) {
   *ret = ((x + y - 1) / y);
 }
 
+const int BLOCK_SIZE = 16;
+const int DIM_SPACE = 64;
 template <typename scalar_t>
 __global__ void flash_attention_v1_kernel(
   const scalar_t *Q, const scalar_t *K, const scalar_t *V,
   scalar_t *O, scalar_t *l, scalar_t *m,
   int B, int N, int D) {
-  __shared__ scalar_t Q_shared[16 * 16];
-  __shared__ scalar_t K_shared[16 * 16];
-  __shared__ scalar_t V_shared[16 * 16];
-  __shared__ scalar_t shared_vals[16 * 16];
+  __shared__ scalar_t Q_shared[BLOCK_SIZE][DIM_SPACE];
+  __shared__ scalar_t K_shared[BLOCK_SIZE][DIM_SPACE];
+  __shared__ scalar_t V_shared[BLOCK_SIZE][DIM_SPACE];
+  __shared__ scalar_t shared_vals[BLOCK_SIZE][BLOCK_SIZE];
 
   // Q: (B, N, D)
   // K: (B, N, D)
   // V: (B, N, D)
-
-  int block_c = blockDim.x;
-  int block_r = blockDim.y;
-
-  auto curr_Q = Q + gridDim.x * N * D + block_r * D;
-  auto curr_K = K + gridDim.x * N * D + block_c * D;
-  auto curr_V = V + gridDim.x * N * D + block_c * D;
-  auto curr_O = O + gridDim.x * N * D + block_r * D;
-  auto curr_l = l + gridDim.x * N;
-  auto curr_m = m + gridDim.x * N;
-
-  for(int j = 0; j < 16; j++) {
+  for(int j = 0; j < (N / BLOCK_SIZE); j++) {
     // Load K_j, V_j into shared memory
-    for (int t = 0; t < 16; ++t) {
-      K_shared[t * 16 + j] = curr_K[t];
-      V_shared[t * 16 + j] = curr_V[t];
+
+    for (int t = threadIdx.y; t < D; t += blockDim.y) {
+      int K_index = blockIdx.x * N * D + j * BLOCK_SIZE * D + threadIdx.x * D + t;
+      K_shared[threadIdx.x][t] = K[K_index];
+      V_shared[threadIdx.x][t] = V[K_index];
     }
     __syncthreads();
-    printf("222\n");
-    for (int i = 0; i < 16; i++) {
-      auto m = curr_m + i * 16;
-      auto l = curr_l + i * 16;
-      // Load Q_i into shared memory
-      for (int t = 0; t < 16; ++t)
-        Q_shared[t * tile_r + i] = curr_Q[t];
-
+    for (int i = 0; i < (N / BLOCK_SIZE); i++) {
+      // fix current _m, _l;
+      auto _m = m + blockIdx.x * N + i * BLOCK_SIZE;
+      auto _l = l + blockIdx.x * N + i * BLOCK_SIZE;
+      // // Load Q_i into shared memory
+      for (int t = threadIdx.y; t < D; t += blockDim.y) {
+        int Q_index = blockIdx.x * N * D + i * BLOCK_SIZE * D + threadIdx.x * D + t;
+        Q_shared[threadIdx.x][t] = Q[Q_index];
+      }
       __syncthreads();
-      scalar_t S_ij = 0;
-      printf("333\n");
-      for (int t = 0 ; t < 16; ++t)
-        S_ij += Q_shared[threadIdx.x * 16 + t] * K_shared[threadIdx.y * 16 + t];
-      printf("%0.4f\n", float(S_ij));
+
+      float S_ij = 0;
+      for (int t = 0 ; t < D; ++t)
+        S_ij += Q_shared[threadIdx.x][t] * K_shared[threadIdx.y][t];
+
+      // S 16 x 16 matrix, is stored across thread block (16 x 16)
       float max_ij;
-      shared_vals[threadIdx.x * 16 + threadIdx.y] = S_ij;
+      shared_vals[threadIdx.x][threadIdx.y] = S_ij;
       __syncthreads();
       if (threadIdx.y == 0) {
-
-        for (int t = 1; t < 16; ++t)
-          shared_vals[threadIdx.x * 16 + 0] = max(shared_vals[threadIdx.x * 16 + 0], shared_vals[threadIdx.x * 16 + t]);
+        for (int t = 1; t < BLOCK_SIZE; ++t)
+          shared_vals[threadIdx.x][0] = max(shared_vals[threadIdx.x][0], shared_vals[threadIdx.x][t]);
       }
       __syncthreads();
-      max_ij = shared_vals[threadIdx.x * 16 + 0];
+      max_ij = shared_vals[threadIdx.x][0];
 
+      float P_ij = exp(S_ij - max_ij);
 
-      scalar_t P_ij = exp(S_ij - max_ij);
-
-      float l_ij;
-      shared_vals[threadIdx.x * 16 + threadIdx.y] = P_ij;
+      shared_vals[threadIdx.x][threadIdx.y] = P_ij;
       __syncthreads();
       if (threadIdx.y == 0) {
-        for (int t = 1; t < 16; ++t)
-          shared_vals[threadIdx.x * 16 + 0] += shared_vals[threadIdx.x * 16 + t];
+        for (int t = 1; t < BLOCK_SIZE; ++t)
+          shared_vals[threadIdx.x][0] += shared_vals[threadIdx.x][t];
       }
       __syncthreads();
-      l_ij = shared_vals[threadIdx.x * 16 + 0];
+      float l_ij = shared_vals[threadIdx.x][0];
+      float old_mi = _m[threadIdx.x];
+      float old_l = _l[threadIdx.x];
+      float new_mi = max(old_mi, max_ij);
+      float exp_left = exp(old_mi - new_mi);
+      float exp_right = exp(max_ij - new_mi);
+      float new_l = old_l * exp(old_mi - new_mi) + l_ij;
 
-      // auto mi_old = m[i];
-      auto old_mi = m[threadIdx.x];
-      auto old_l = l[threadIdx.x];
-      auto exp_left = exp(old_mi - m[i]);
-      auto exp_right = exp(max_ij - m[i]);
-      auto new_mi = max(old_mi, max_ij);
-      auto new_l = old_l * exp(old_mi - new_mi) + l_ij;
-
-      // store Pij into shared memory
-      shared_vals[threadIdx.x * 16 + threadIdx.y] = exp_right * P_ij;
+      shared_vals[threadIdx.x][threadIdx.y] = P_ij;
       __syncthreads();
-
-      scalar_t O_ij = 0.0;
-      for (int t = 0; t < 16; ++t)
-        O_ij += (1.0 / l_ij) * shared_vals[threadIdx.x * 16 + t] * V_shared[t * 16 + threadIdx.y];
-      O_ij += (1.0 / l_ij) * l[threadIdx.x] * curr_O[threadIdx.x * 16 + threadIdx.y];
-      curr_O[threadIdx.x * 16 + threadIdx.y] = O_ij;
-      if (threadIdx.x == 0) {
-        m[i] = new_mi;
-        l[i] = new_l;
+      float divd = (1.0f / (1e-6f + new_l));
+      for (int t = threadIdx.y; t < D; t += blockDim.y) {
+        auto O_index = blockIdx.x * N * D + i * BLOCK_SIZE * D + threadIdx.x * D + t;
+        float O_temp = divd * exp_left * old_l * O[O_index];
+        if (O_temp != 0.0f)
+          printf("O_temp: %f\n", O_temp);
+        for (int l = 0; l < BLOCK_SIZE; ++l) {
+          O_temp += divd * exp_right * shared_vals[threadIdx.x][l] * V_shared[l][t];
+        }
+        O[O_index] = O_temp;
       }
+      __syncthreads();
+      if (threadIdx.y == 0) {
+        _m[threadIdx.x] = new_mi;
+        _l[threadIdx.x] = new_l;
+      }
+      __syncthreads();
     }
   }
 }
@@ -138,19 +135,13 @@ torch::Tensor flash_attention_v1(torch::Tensor Q, torch::Tensor K, torch::Tensor
   auto options = Q.options();
   auto O = torch::zeros({B, H, N, D}, options);
   auto l = torch::zeros({B, H, N}, options);
-  auto m = torch::full({B, H, N}, -std::numeric_limits<float>::infinity(), options);
+  // if fill_value = -infty then -infty + infty = nan error,
+  // so fill appropriate min value
+  auto m = torch::full({B, H, N}, -10000.0, options);
 
   // We just view the input tensors as 2D tensors of shape (B*H, N, D)
   auto batch_size = B * H;
-  auto M = getDeviceBlockSharedMemSize();
-
-  if (dtype == torch::kFloat32)
-    M /= 4;
-  else if (dtype == torch::kHalf)
-    M /= 2;
-
-
-  dim3 block_size(16, 16);
+  dim3 block_size(BLOCK_SIZE, BLOCK_SIZE);
   dim3 grid_size(batch_size);
   AT_DISPATCH_FLOATING_TYPES_AND_HALF(
     Q.scalar_type(), "flash_attention_v1", [&] {

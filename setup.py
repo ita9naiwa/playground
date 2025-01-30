@@ -34,6 +34,7 @@ setup(
             extra_compile_args={
                 'cxx': [],
                 'nvcc': [
+                    '-O0',
                     '-gencode=arch=compute_80,code=sm_80',
                 ]
             }
