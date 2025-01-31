@@ -12,31 +12,6 @@
 const int BLOCK_SIZE = 16;
 const int DIM_SPACE = 64;
 
-__device__ inline float warpReduceMax(float val) {
-  // Suppose each warp is 32 threads, and we want separate reduce for 0..15, 16..31.
-  // laneId = 0..31
-  unsigned laneId = threadIdx.x & 31;
-  // halfId = 0 for lanes 0..15, 1 for lanes 16..31
-  unsigned halfId = laneId >> 4;
-
-  // Masks for the two half-warps:
-  unsigned maskLo = 0x0000ffff;  // active lanes 0..15
-  unsigned maskHi = 0xffff0000;  // active lanes 16..31
-  unsigned mask   = (halfId == 0) ? maskLo : maskHi;
-
-  // Each half-warp does a separate reduction on its 16 threads:
-
-  // XOR-based shuffle ignoring the other half
-  #pragma unroll
-  for (int offset = 8; offset > 0; offset >>= 1) {
-    float other = __shfl_xor_sync(mask, val, offset, 32);
-    // e.g. sum or max:
-    // val += other;
-    val = fmaxf(val, other);
-  }
-  return val;
-
-}
 template <typename scalar_t>
 __global__ void flash_attention_v1_kernel(
     const scalar_t *Q, const scalar_t *K, const scalar_t *V,
