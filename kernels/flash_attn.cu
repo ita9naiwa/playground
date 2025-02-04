@@ -9,7 +9,7 @@
 #include "flash_attn.h"
 #include "torch/types.h"
 
-const int BLOCK_SIZE = 16;
+const int BLOCK_SIZE = 32;
 const int DIM_SPACE = 64;
 
 template <typename scalar_t>
@@ -17,17 +17,16 @@ __global__ void flash_attention_v1_kernel(
     const scalar_t *Q, const scalar_t *K, const scalar_t *V,
     scalar_t *O, scalar_t *l, scalar_t *m,
     int B, int N, int D) {
-
   __shared__ scalar_t Q_shared[BLOCK_SIZE][DIM_SPACE];
   __shared__ scalar_t K_shared[BLOCK_SIZE][DIM_SPACE];
   __shared__ scalar_t V_shared[BLOCK_SIZE][DIM_SPACE];
   __shared__ scalar_t shared_vals[BLOCK_SIZE][BLOCK_SIZE];
 
-  int tx = threadIdx.x / 16;
-  int ty = threadIdx.x % 16;
+  int tx = threadIdx.x / BLOCK_SIZE;
+  int ty = threadIdx.x % BLOCK_SIZE;
 
   for (int j = 0; j < (N / BLOCK_SIZE); j++) {
-    for (int t = ty; t < D; t += 16) {
+    for (int t = ty; t < D; t += BLOCK_SIZE) {
       int idx = blockIdx.x * N * D + j * BLOCK_SIZE * D + tx * D + t;
       K_shared[tx][t] = K[idx];
       V_shared[tx][t] = V[idx];
@@ -38,7 +37,7 @@ __global__ void flash_attention_v1_kernel(
       auto _m = m + blockIdx.x * N + i * BLOCK_SIZE;
       auto _l = l + blockIdx.x * N + i * BLOCK_SIZE;
 
-      for (int t = ty; t < D; t += 16) {
+      for (int t = ty; t < D; t += BLOCK_SIZE) {
         int idx = blockIdx.x * N * D + i * BLOCK_SIZE * D + tx * D + t;
         Q_shared[tx][t] = Q[idx];
       }
@@ -49,47 +48,38 @@ __global__ void flash_attention_v1_kernel(
         S_ij_orig += Q_shared[tx][t] * K_shared[ty][t];
       }
 
+      // Use xor_sync for max reduction
       float S_ij = S_ij_orig;
-      for (int offset = 8; offset > 0; offset >>= 1) {
-        float val = __shfl_down_sync(0xffff, S_ij, offset, 16);
+      for (int offset = 16; offset > 0; offset >>= 1) {
+        float val = __shfl_xor_sync(0xffffffff, S_ij, offset, 32);
         S_ij = fmaxf(S_ij, val);
       }
-
-      if (ty == 0) {
-        shared_vals[tx][0] = S_ij;
-      }
+      float max_ij = S_ij;
       __syncthreads();
 
-      float max_ij = shared_vals[tx][0];
-      float P_ij = expf(S_ij_orig - max_ij);
+      float P_ij = __expf(S_ij_orig - max_ij);
 
-      shared_vals[tx][ty] = P_ij;
-      __syncthreads();
-
+      // Use xor_sync for sum reduction
       float row_sum = P_ij;
-      for (int offset = 8; offset > 0; offset >>= 1) {
-        float val = __shfl_down_sync(0xffff, row_sum, offset, 16);
+      for (int offset = 16; offset > 0; offset >>= 1) {
+        float val = __shfl_xor_sync(0xffffffff, row_sum, offset, 32);
         row_sum += val;
       }
+      float l_ij = row_sum;
 
-      if (ty == 0) {
-        shared_vals[tx][0] = row_sum;
-      }
       __syncthreads();
-
-      float l_ij = shared_vals[tx][0];
       float old_mi = _m[tx];
       float old_l = _l[tx];
       float new_mi = fmaxf(old_mi, max_ij);
-      float alpha = expf(old_mi - new_mi);
-      float beta = expf(max_ij - new_mi);
+      float alpha = __expf(old_mi - new_mi);
+      float beta = __expf(max_ij - new_mi);
       float new_l = alpha * old_l + beta * l_ij;
       __syncthreads();
 
       shared_vals[tx][ty] = P_ij;
       __syncthreads();
 
-      for (int t = ty; t < D; t += 16) {
+      for (int t = ty; t < D; t += BLOCK_SIZE) {
         int O_index = blockIdx.x * N * D + i * BLOCK_SIZE * D + tx * D + t;
         float O_temp = (old_l / new_l) * alpha * O[O_index];
         for (int l0 = 0; l0 < BLOCK_SIZE; l0++) {
@@ -99,11 +89,9 @@ __global__ void flash_attention_v1_kernel(
       }
       __syncthreads();
 
-      if (ty == 0) {
-        _m[tx] = new_mi;
-        _l[tx] = new_l;
-      }
-      __syncthreads();
+
+      _m[tx] = new_mi;
+      _l[tx] = new_l;
     }
   }
 }
@@ -128,7 +116,7 @@ torch::Tensor flash_attention_v1(torch::Tensor Q, torch::Tensor K, torch::Tensor
   dim3 block_size(BLOCK_SIZE * BLOCK_SIZE);
   dim3 grid_size(batch_size);
 
-  AT_DISPATCH_FLOATING_TYPES_AND_HALF(
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(
     Q.scalar_type(), "flash_attention_v1", [&] {
       flash_attention_v1_kernel<<<grid_size, block_size>>>(
         Q.data_ptr<scalar_t>(),
