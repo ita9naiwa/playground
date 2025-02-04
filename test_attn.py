@@ -24,7 +24,7 @@ test_validation(B, H, N, D)
 
 
 def test_perf():
-    B, H, N, D = 128, 64, 64, 64
+    B, H, N, D = 128, 32, 128, 64
     Q = torch.randn(B, H, N, D).to(torch.float16).cuda()
     K = torch.randn(B, H, N, D).to(torch.float16).cuda()
     V = torch.randn(B, H, N, D).to(torch.float16).cuda()

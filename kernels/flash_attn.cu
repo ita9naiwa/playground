@@ -50,6 +50,7 @@ __global__ void flash_attention_v1_kernel(
 
       // Use xor_sync for max reduction
       float S_ij = S_ij_orig;
+      #pragma unroll
       for (int offset = 16; offset > 0; offset >>= 1) {
         float val = __shfl_xor_sync(0xffffffff, S_ij, offset, 32);
         S_ij = fmaxf(S_ij, val);
@@ -61,20 +62,20 @@ __global__ void flash_attention_v1_kernel(
 
       // Use xor_sync for sum reduction
       float row_sum = P_ij;
+      #pragma unroll
       for (int offset = 16; offset > 0; offset >>= 1) {
         float val = __shfl_xor_sync(0xffffffff, row_sum, offset, 32);
         row_sum += val;
       }
       float l_ij = row_sum;
-
       __syncthreads();
+
       float old_mi = _m[tx];
       float old_l = _l[tx];
       float new_mi = fmaxf(old_mi, max_ij);
       float alpha = __expf(old_mi - new_mi);
       float beta = __expf(max_ij - new_mi);
       float new_l = alpha * old_l + beta * l_ij;
-      __syncthreads();
 
       shared_vals[tx][ty] = P_ij;
       __syncthreads();
@@ -82,6 +83,7 @@ __global__ void flash_attention_v1_kernel(
       for (int t = ty; t < D; t += BLOCK_SIZE) {
         int O_index = blockIdx.x * N * D + i * BLOCK_SIZE * D + tx * D + t;
         float O_temp = (old_l / new_l) * alpha * O[O_index];
+        #pragma unroll
         for (int l0 = 0; l0 < BLOCK_SIZE; l0++) {
           O_temp += (beta / new_l) * shared_vals[tx][l0] * V_shared[l0][t];
         }
