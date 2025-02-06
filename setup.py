@@ -23,7 +23,8 @@ setup(
                 'kernels/gemm_relu.cu',
                 'kernels/revisit_matmul.cu',
                 'kernels/flash_attn.cu',
-                'pybind.cu'
+                'kernels/wmma_matmul.cu',
+                'pybind.cu',
             ],
             include_dirs=[
                 # cuda_root,

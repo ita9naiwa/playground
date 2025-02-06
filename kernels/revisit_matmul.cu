@@ -8,9 +8,13 @@
 
 #include "ATen/Dispatch.h"
 #include "ATen/ops/transpose.h"
-#include "revisit_matmul.h"
+#include "c10/core/ScalarType.h"
 
-__global__ void matmul_naive(int *A, int *B, int *C, int M, int K, int N, bool B_transposed) {
+#include "revisit_matmul.h"
+#include "wmma_matmul.h"
+
+template <typename scalar_t>
+__global__ void matmul_naive(scalar_t *A, scalar_t *B, scalar_t *C, int M, int K, int N, bool B_transposed) {
   int init_i = blockIdx.x * blockDim.x + threadIdx.x;
   int init_j = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -19,7 +23,7 @@ __global__ void matmul_naive(int *A, int *B, int *C, int M, int K, int N, bool B
 
   for (int i = init_i; i < M; i += i_stride) {
     for (int j = init_j; j < N; j += j_stride) {
-      int sum = 0;
+      scalar_t sum = 0;
       for (int k = 0; k < K; ++k) {
         if (!B_transposed)
           sum += A[i * K + k] * B[k * N + j];
@@ -31,9 +35,10 @@ __global__ void matmul_naive(int *A, int *B, int *C, int M, int K, int N, bool B
   }
 }
 
-__global__ void matmul_smem(int *A, int *B, int *C, int M, int K, int N, bool B_transposed) {
-  __shared__ int tile_A[16][16];
-  __shared__ int tile_B[16][16];
+template <typename scalar_t>
+__global__ void matmul_smem(scalar_t *A, scalar_t *B, scalar_t *C, int M, int K, int N, bool B_transposed) {
+  __shared__ scalar_t tile_A[16][16];
+  __shared__ scalar_t tile_B[16][16];
 
   int init_i = blockIdx.x * blockDim.x;
   int init_j = blockIdx.y * blockDim.y;
@@ -78,7 +83,10 @@ __global__ void matmul_smem(int *A, int *B, int *C, int M, int K, int N, bool B_
   }
 }
 
+
+
 torch::Tensor matmul(torch::Tensor A, torch::Tensor B, std::optional<torch::Tensor> C, int version, bool B_transposed) {
+
   int M = A.size(0);
   int K = A.size(1);
   int N = B.size(1);
@@ -91,6 +99,10 @@ torch::Tensor matmul(torch::Tensor A, torch::Tensor B, std::optional<torch::Tens
   else
     _C = C.value();
 
+  if (version == 2) {
+    return wmma_matmul(A, B, _C);
+  }
+
   auto _B = B;
   if (B_transposed) _B = torch::transpose(B, 1, 0);
 
@@ -99,17 +111,19 @@ torch::Tensor matmul(torch::Tensor A, torch::Tensor B, std::optional<torch::Tens
 
   switch (version) {
     case 0:
-      AT_DISPATCH_INTEGRAL_TYPES(A.scalar_type(), "matmul", [&] {
-        matmul_naive<<<grid_size, block_size>>>(A.data_ptr<int>(), _B.data_ptr<int>(), _C.data_ptr<int>(), M, K, N,
+      AT_DISPATCH_REDUCED_FLOATING_TYPES(A.scalar_type(), "matmul", [&] {
+        matmul_naive<<<grid_size, block_size>>>(A.data_ptr<scalar_t>(), _B.data_ptr<scalar_t>(), _C.data_ptr<scalar_t>(), M, K, N,
                                                 B_transposed);
       });
       break;
     case 1:
-      AT_DISPATCH_INTEGRAL_TYPES(A.scalar_type(), "matmul", [&] {
-        matmul_smem<<<grid_size, block_size>>>(A.data_ptr<int>(), B.data_ptr<int>(), _C.data_ptr<int>(), M, K, N,
+      AT_DISPATCH_REDUCED_FLOATING_TYPES(A.scalar_type(), "matmul", [&] {
+        matmul_smem<<<grid_size, block_size>>>(A.data_ptr<scalar_t>(), B.data_ptr<scalar_t>(), _C.data_ptr<scalar_t>(), M, K, N,
                                                B_transposed);
       });
       break;
+    default:
+      throw std::runtime_error("Invalid version");
   }
 
   cudaError_t err = cudaGetLastError();
