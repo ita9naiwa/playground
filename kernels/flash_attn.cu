@@ -1,10 +1,12 @@
-#include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
+#include <torch/extension.h>
+
 #include <cmath>
 #include <cstdio>
 #include <limits>
+
 #include "c10/core/ScalarType.h"
 #include "flash_attn.h"
 #include "torch/types.h"
@@ -13,10 +15,8 @@ const int BLOCK_SIZE = 32;
 const int DIM_SPACE = 64;
 
 template <typename scalar_t>
-__global__ void flash_attention_v1_kernel(
-    const scalar_t *Q, const scalar_t *K, const scalar_t *V,
-    scalar_t *O, scalar_t *l, scalar_t *m,
-    int B, int N, int D) {
+__global__ void flash_attention_v1_kernel(const scalar_t *Q, const scalar_t *K, const scalar_t *V, scalar_t *O,
+                                          scalar_t *l, scalar_t *m, int B, int N, int D) {
   __shared__ scalar_t Q_shared[BLOCK_SIZE][DIM_SPACE];
   __shared__ scalar_t K_shared[BLOCK_SIZE][DIM_SPACE];
   __shared__ scalar_t V_shared[BLOCK_SIZE][DIM_SPACE];
@@ -50,7 +50,7 @@ __global__ void flash_attention_v1_kernel(
 
       // Use xor_sync for max reduction
       float S_ij = S_ij_orig;
-      #pragma unroll
+#pragma unroll
       for (int offset = 16; offset > 0; offset >>= 1) {
         float val = __shfl_xor_sync(0xffffffff, S_ij, offset, 32);
         S_ij = fmaxf(S_ij, val);
@@ -62,7 +62,7 @@ __global__ void flash_attention_v1_kernel(
 
       // Use xor_sync for sum reduction
       float row_sum = P_ij;
-      #pragma unroll
+#pragma unroll
       for (int offset = 16; offset > 0; offset >>= 1) {
         float val = __shfl_xor_sync(0xffffffff, row_sum, offset, 32);
         row_sum += val;
@@ -83,14 +83,13 @@ __global__ void flash_attention_v1_kernel(
       for (int t = ty; t < D; t += BLOCK_SIZE) {
         int O_index = blockIdx.x * N * D + i * BLOCK_SIZE * D + tx * D + t;
         float O_temp = (old_l / new_l) * alpha * O[O_index];
-        #pragma unroll
+#pragma unroll
         for (int l0 = 0; l0 < BLOCK_SIZE; l0++) {
           O_temp += (beta / new_l) * shared_vals[tx][l0] * V_shared[l0][t];
         }
         O[O_index] = O_temp;
       }
       __syncthreads();
-
 
       _m[tx] = new_mi;
       _l[tx] = new_l;
@@ -118,19 +117,11 @@ torch::Tensor flash_attention_v1(torch::Tensor Q, torch::Tensor K, torch::Tensor
   dim3 block_size(BLOCK_SIZE * BLOCK_SIZE);
   dim3 grid_size(batch_size);
 
-  AT_DISPATCH_REDUCED_FLOATING_TYPES(
-    Q.scalar_type(), "flash_attention_v1", [&] {
-      flash_attention_v1_kernel<<<grid_size, block_size>>>(
-        Q.data_ptr<scalar_t>(),
-        K.data_ptr<scalar_t>(),
-        V.data_ptr<scalar_t>(),
-        O.data_ptr<scalar_t>(),
-        l.data_ptr<scalar_t>(),
-        m.data_ptr<scalar_t>(),
-        batch_size, N, D
-      );
-    }
-  );
+  AT_DISPATCH_REDUCED_FLOATING_TYPES(Q.scalar_type(), "flash_attention_v1", [&] {
+    flash_attention_v1_kernel<<<grid_size, block_size>>>(
+        Q.data_ptr<scalar_t>(), K.data_ptr<scalar_t>(), V.data_ptr<scalar_t>(), O.data_ptr<scalar_t>(),
+        l.data_ptr<scalar_t>(), m.data_ptr<scalar_t>(), batch_size, N, D);
+  });
 
   cudaError_t err = cudaGetLastError();
   if (err != cudaSuccess) {

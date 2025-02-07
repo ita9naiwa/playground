@@ -10,11 +10,6 @@ def verify():
     B = torch.HalfTensor(N, K).cuda().random_(0, 10).contiguous()
     C_ref = torch.matmul(A.cpu(), B.cpu()).cuda()
     for version in [0, 1, 2]:
-        if version == 2:
-            M, N, K = 64, 32, 64
-            A = torch.HalfTensor(M, N).cuda().random_(0, 10).contiguous()
-            B = torch.HalfTensor(N, K).cuda().random_(0, 10).contiguous()
-            C_ref = torch.matmul(A.cpu(), B.cpu()).cuda()
         C = cp.matmul(A, B, version=version)
         if not torch.equal(C, C_ref):
             print(f"Error in version {version}")

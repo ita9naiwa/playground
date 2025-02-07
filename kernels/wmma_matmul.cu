@@ -1,7 +1,10 @@
 #include <iostream>
 
+#include "ATen/core/TensorBody.h"
 #include "ATen/ops/pad.h"
+#include "c10/util/Exception.h"
 #include "c10/util/Half.h"
+#include "torch/nn/options/padding.h"
 #include "wmma_matmul.h"
 
 const int TILE_SIZE = 16;
@@ -10,6 +13,8 @@ using B_FRAGMENT = wmma::fragment<wmma::matrix_b, TILE_SIZE, TILE_SIZE, TILE_SIZ
 using ACCM_FRAGMENT = wmma::fragment<wmma::accumulator, TILE_SIZE, TILE_SIZE, TILE_SIZE, half>;
 
 __global__ void wmmaKernel(half *a, half *b, half *c, int M, int N, int K) {
+  // Each warp loops i'th row of A and j'th column of B
+  // to compute i'th row and j'th column of C.
   A_FRAGMENT a_frag;
   B_FRAGMENT b_frag;
   ACCM_FRAGMENT c_frag;
@@ -33,13 +38,9 @@ int next_multiple_of_16(int n) {
   return static_cast<int>(ret);
 }
 
-int ceil(int a, int b=TILE_SIZE) {
-  return (a + b - 1) / b;
-}
+int ceil(int a, int b = TILE_SIZE) { return (a + b - 1) / b; }
 
-torch::Tensor wmma_matmul(torch::Tensor A,
-                   torch::Tensor B,
-                   torch::Tensor C) {
+torch::Tensor wmma_matmul(torch::Tensor A, torch::Tensor B, torch::Tensor C) {
   if (A.scalar_type() != torch::kHalf || B.scalar_type() != torch::kHalf || C.scalar_type() != torch::kHalf) {
     throw std::runtime_error("Input tensors must be of type torch::kHalf");
   }
@@ -48,16 +49,39 @@ torch::Tensor wmma_matmul(torch::Tensor A,
   const int N = B.size(1);
   const int K = A.size(1);
 
+  bool require_pad = false;
   if ((M % 16) || (N % 16) || (K % 16)) {
-    throw std::runtime_error("Input dimensions must be multiples of 16");
+    TORCH_WARN(
+        "Input dimensions are not multiples of 16."
+        "Padding to the next multiple of 16.\n"
+        "This will slow the compuation.");
+    require_pad = true;
   }
 
-  dim3 grid(M / TILE_SIZE, N / TILE_SIZE);
+  int _M = M;
+  int _N = N;
+  int _K = K;
+  torch::Tensor A_padded = A;
+  torch::Tensor B_padded = B;
+  torch::Tensor C_padded = C;
+  if (require_pad) {
+    _M = next_multiple_of_16(M);
+    _N = next_multiple_of_16(N);
+    _K = next_multiple_of_16(K);
+
+    // Note: Pad function in PyTorch interprets padding arguments in reverse order from the last dimension.
+    torch::nn::functional::PadFuncOptions A_pad_options({0, _K - K, 0, _M - M});
+    torch::nn::functional::PadFuncOptions B_pad_options({0, _N - N, 0, _K - K});
+    torch::nn::functional::PadFuncOptions C_pad_options({0, _N - N, 0, _M - M});
+
+    A_padded = torch::nn::functional::pad(A, A_pad_options);
+    B_padded = torch::nn::functional::pad(B, B_pad_options);
+    C_padded = torch::nn::functional::pad(C, C_pad_options);
+  }
+
+  dim3 grid(_M / TILE_SIZE, _N / TILE_SIZE);
   dim3 block(32);
-  wmmaKernel<<<grid, block>>>(
-    (half*)A.data_ptr<at::Half>(),
-    (half*)B.data_ptr<at::Half>(),
-    (half*)C.data_ptr<at::Half>(),
-    M, N, K);
-  return C;
+  wmmaKernel<<<grid, block>>>((half *)A_padded.data_ptr<at::Half>(), (half *)B_padded.data_ptr<at::Half>(),
+                              (half *)C_padded.data_ptr<at::Half>(), _M, _N, _K);
+  return C_padded.index({torch::indexing::Slice(0, M), torch::indexing::Slice(0, N)});
 }

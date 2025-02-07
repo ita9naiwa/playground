@@ -9,7 +9,6 @@
 #include "ATen/Dispatch.h"
 #include "ATen/ops/transpose.h"
 #include "c10/core/ScalarType.h"
-
 #include "revisit_matmul.h"
 #include "wmma_matmul.h"
 
@@ -83,10 +82,7 @@ __global__ void matmul_smem(scalar_t *A, scalar_t *B, scalar_t *C, int M, int K,
   }
 }
 
-
-
 torch::Tensor matmul(torch::Tensor A, torch::Tensor B, std::optional<torch::Tensor> C, int version, bool B_transposed) {
-
   int M = A.size(0);
   int K = A.size(1);
   int N = B.size(1);
@@ -112,14 +108,14 @@ torch::Tensor matmul(torch::Tensor A, torch::Tensor B, std::optional<torch::Tens
   switch (version) {
     case 0:
       AT_DISPATCH_REDUCED_FLOATING_TYPES(A.scalar_type(), "matmul", [&] {
-        matmul_naive<<<grid_size, block_size>>>(A.data_ptr<scalar_t>(), _B.data_ptr<scalar_t>(), _C.data_ptr<scalar_t>(), M, K, N,
-                                                B_transposed);
+        matmul_naive<<<grid_size, block_size>>>(A.data_ptr<scalar_t>(), _B.data_ptr<scalar_t>(),
+                                                _C.data_ptr<scalar_t>(), M, K, N, B_transposed);
       });
       break;
     case 1:
       AT_DISPATCH_REDUCED_FLOATING_TYPES(A.scalar_type(), "matmul", [&] {
-        matmul_smem<<<grid_size, block_size>>>(A.data_ptr<scalar_t>(), B.data_ptr<scalar_t>(), _C.data_ptr<scalar_t>(), M, K, N,
-                                               B_transposed);
+        matmul_smem<<<grid_size, block_size>>>(A.data_ptr<scalar_t>(), B.data_ptr<scalar_t>(), _C.data_ptr<scalar_t>(),
+                                               M, K, N, B_transposed);
       });
       break;
     default:
