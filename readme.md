@@ -10,3 +10,8 @@ bear -- python setup.py build_ext --inplace |& tee log
 ```
 find . -name "*.cpp" -o -name "*.cu" | xargs clang-format -i
 ```
+
+## run sanitizer
+```
+/usr/local/cuda/bin/compute-sanitizer python test_conv.py
+```

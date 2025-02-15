@@ -24,6 +24,7 @@ setup(
                 'kernels/revisit_matmul.cu',
                 'kernels/flash_attn.cu',
                 'kernels/wmma_matmul.cu',
+                'kernels/conv1d.cu',
                 'pybind.cu',
             ],
             include_dirs=[
